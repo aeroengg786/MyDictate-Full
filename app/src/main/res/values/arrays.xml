@@ -323,6 +323,41 @@
         <item>openai/gpt-oss-20b</item>
     </string-array>
     
+    <string-array name="dictate_history_max_entries">
+        <item>5</item>
+        <item>10</item>
+        <item>20</item>
+        <item>30</item>
+        <item>40</item>
+        <item>50</item>
+    </string-array>
+    <string-array name="dictate_history_max_entries_values">
+        <item>5</item>
+        <item>10</item>
+        <item>20</item>
+        <item>30</item>
+        <item>40</item>
+        <item>50</item>
+    </string-array>
+    <string-array name="dictate_history_retention">
+        <item>@string/dictate_history_1_day</item>
+        <item>@string/dictate_history_3_days</item>
+        <item>@string/dictate_history_7_days</item>
+        <item>@string/dictate_history_1_month</item>
+        <item>@string/dictate_history_2_months</item>
+        <item>@string/dictate_history_3_months</item>
+        <item>@string/dictate_history_6_months</item>
+    </string-array>
+    <string-array name="dictate_history_retention_values">
+        <item>1</item>
+        <item>3</item>
+        <item>7</item>
+        <item>30</item>
+        <item>60</item>
+        <item>90</item>
+        <item>180</item>
+    </string-array>
+
     <string-array name="dictate_theme_entries">
         <item>System</item>
         <item>@string/dictate_light</item>
@@ -332,5 +367,46 @@
         <item>system</item>
         <item>light</item>
         <item>dark</item>
+    </string-array>
+
+    <string-array name="dictate_clipboard_max_items">
+        <item>10</item>
+        <item>20</item>
+        <item>30</item>
+        <item>50</item>
+        <item>100</item>
+    </string-array>
+    <string-array name="dictate_clipboard_max_items_values">
+        <item>10</item>
+        <item>20</item>
+        <item>30</item>
+        <item>50</item>
+        <item>100</item>
+    </string-array>
+    <string-array name="dictate_clipboard_retention">
+        <item>@string/dictate_clipboard_1_hour</item>
+        <item>@string/dictate_clipboard_6_hours</item>
+        <item>@string/dictate_clipboard_1_day</item>
+        <item>@string/dictate_clipboard_3_days</item>
+        <item>@string/dictate_clipboard_7_days</item>
+    </string-array>
+    <string-array name="dictate_clipboard_retention_values">
+        <item>1</item>
+        <item>6</item>
+        <item>24</item>
+        <item>72</item>
+        <item>168</item>
+    </string-array>
+
+    <string-array name="dictate_elevenlabs_mode_entries">
+        <item>@string/dictate_elevenlabs_mode_off</item>
+        <item>@string/dictate_elevenlabs_mode_batch</item>
+        <item>@string/dictate_elevenlabs_mode_realtime</item>
+    </string-array>
+
+    <string-array name="dictate_elevenlabs_mode_values">
+        <item>off</item>
+        <item>batch</item>
+        <item>realtime</item>
     </string-array>
 </resources>

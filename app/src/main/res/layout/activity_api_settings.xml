@@ -263,5 +263,45 @@
                     android:hint="@string/dictate_custom_rewording_model_hint" />
             </LinearLayout>
         </LinearLayout>
+        <!-- ElevenLabs Divider -->
+        <View
+            android:id="@+id/api_settings_elevenlabs_divider"
+            android:layout_width="match_parent"
+            android:layout_height="2dp"
+            android:layout_marginTop="36dp"
+            android:background="@color/dictate_blue" />
+
+        <!-- ElevenLabs Section -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="36dp"
+            android:layout_marginBottom="32dp">
+
+            <TextView
+                android:id="@+id/api_settings_elevenlabs_section_tv"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/dictate_elevenlabs_section_title"
+                android:textColor="@color/dictate_blue" />
+
+            <TextView
+                android:id="@+id/api_settings_elevenlabs_api_key_tv"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/enter_elevenlabs_api_key"
+                android:textColor="@color/dictate_blue" />
+
+            <EditText
+                android:id="@+id/api_settings_elevenlabs_api_key_et"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ems="10"
+                android:inputType="textNoSuggestions|textVisiblePassword"
+                android:hint="@string/dictate_elevenlabs_api_key_hint" />
+        </LinearLayout>
+
     </LinearLayout>
 </ScrollView>

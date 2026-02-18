@@ -7,6 +7,9 @@ import android.animation.ValueAnimator;
 import android.annotation.SuppressLint;
 import android.app.Dialog;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipDescription;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -21,11 +24,13 @@ import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PersistableBundle;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.text.InputType;
@@ -49,15 +54,19 @@ import android.view.inputmethod.ExtractedTextRequest;
 import android.view.inputmethod.InputConnection;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.content.res.AppCompatResources;
 import androidx.constraintlayout.widget.ConstraintLayout;
 import androidx.core.content.ContextCompat;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.emoji2.emojipicker.EmojiPickerView;
+import androidx.recyclerview.widget.ItemTouchHelper;
+import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.recyclerview.widget.StaggeredGridLayoutManager;
 
@@ -73,17 +82,35 @@ import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import net.devemperor.dictate.BuildConfig;
 import net.devemperor.dictate.DictateUtils;
 import net.devemperor.dictate.R;
+import net.devemperor.dictate.clipboard.ClipboardHistoryAdapter;
+import net.devemperor.dictate.clipboard.ClipboardHistoryDatabaseHelper;
+import net.devemperor.dictate.clipboard.ClipboardHistoryModel;
 import net.devemperor.dictate.rewording.PromptEditActivity;
 import net.devemperor.dictate.rewording.PromptModel;
 import net.devemperor.dictate.rewording.PromptsDatabaseHelper;
 import net.devemperor.dictate.rewording.PromptsKeyboardAdapter;
 import net.devemperor.dictate.rewording.PromptsOverviewActivity;
 import net.devemperor.dictate.settings.DictateSettingsActivity;
+import net.devemperor.dictate.history.TranscriptionHistoryAdapter;
+import net.devemperor.dictate.history.TranscriptionHistoryDatabaseHelper;
+import net.devemperor.dictate.history.TranscriptionHistoryModel;
 import net.devemperor.dictate.usage.UsageDatabaseHelper;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+
+import okhttp3.MediaType;
+import okhttp3.MultipartBody;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.time.Duration;
@@ -156,6 +183,7 @@ public class DictateInputMethodService extends InputMethodService {
     private List<Integer> swipeWordBoundaries = null;
     private int swipeSelectedSteps = 0;
 
+    private ElevenLabsScribeManager scribeManager;
     private MediaRecorder recorder;
     private ExecutorService speechApiThread;
     private ExecutorService rewordingApiThread;
@@ -196,7 +224,7 @@ public class DictateInputMethodService extends InputMethodService {
     private ProgressBar runningPromptPb;
     private MaterialButton editUndoButton;
     private MaterialButton editRedoButton;
-    private MaterialButton editCutButton;
+    private MaterialButton editHistoryButton;
     private MaterialButton editCopyButton;
     private MaterialButton editPasteButton;
     private MaterialButton editEmojiButton;
@@ -225,6 +253,28 @@ public class DictateInputMethodService extends InputMethodService {
 
     UsageDatabaseHelper usageDb;
 
+    // History
+    TranscriptionHistoryDatabaseHelper historyDb;
+    private ConstraintLayout historyPanelCl;
+    private TextView historyPanelTitleTv;
+    private MaterialButton historyPanelCloseBtn;
+    private RecyclerView historyPanelRv;
+    private TextView historyPanelEmptyTv;
+    private MediaPlayer historyMediaPlayer;
+    private TranscriptionHistoryAdapter historyAdapter;
+
+    // Clipboard
+    private ClipboardManager clipboardManager;
+    private ClipboardManager.OnPrimaryClipChangedListener clipListener;
+    private boolean clipListenerRegistered = false;
+    private ClipboardHistoryDatabaseHelper clipboardDb;
+    private ClipboardHistoryAdapter clipboardAdapter;
+    private ConstraintLayout clipboardPanelCl;
+    private TextView clipboardPanelTitleTv;
+    private MaterialButton clipboardPanelCloseBtn;
+    private RecyclerView clipboardPanelRv;
+    private TextView clipboardPanelEmptyTv;
+
     private interface PromptResultCallback {
         void onSuccess(String text);
         void onFailure();
@@ -236,14 +286,37 @@ public class DictateInputMethodService extends InputMethodService {
     public View onCreateInputView() {
         Context context = new ContextThemeWrapper(this, R.style.Theme_Dictate);
 
+        // Clean up old timer before creating new handlers/runnables (rotation recreates the view
+        // but old timer callbacks remain in the main looper queue referencing the old runnable)
+        if (recordTimeRunnable != null && recordTimeHandler != null) {
+            recordTimeHandler.removeCallbacks(recordTimeRunnable);
+        }
+
+        // Clean up ElevenLabs scribe manager on rotation
+        if (scribeManager != null) {
+            scribeManager.cleanup();
+            scribeManager = null;
+        }
+
         // initialize some stuff
         mainHandler = new Handler(Looper.getMainLooper());
         deleteHandler = new Handler();
         recordTimeHandler = new Handler(Looper.getMainLooper());
         bluetoothHandler = new Handler(Looper.getMainLooper());
 
+        scribeManager = new ElevenLabsScribeManager(mainHandler);
+
         vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
         sp = getSharedPreferences("net.devemperor.dictate", MODE_PRIVATE);
+
+        // Migrate old boolean elevenlabs_mode to new string ListPreference
+        if (sp.getAll().get("net.devemperor.dictate.elevenlabs_mode") instanceof Boolean) {
+            boolean oldValue = sp.getBoolean("net.devemperor.dictate.elevenlabs_mode", false);
+            sp.edit().remove("net.devemperor.dictate.elevenlabs_mode")
+                    .putString("net.devemperor.dictate.elevenlabs_mode", oldValue ? "realtime" : "off")
+                    .commit();
+        }
+
         promptsDb = new PromptsDatabaseHelper(this);
         usageDb = new UsageDatabaseHelper(this);
         vibrationEnabled = sp.getBoolean("net.devemperor.dictate.vibration", true);
@@ -279,7 +352,7 @@ public class DictateInputMethodService extends InputMethodService {
 
         editUndoButton = dictateKeyboardView.findViewById(R.id.edit_undo_btn);
         editRedoButton = dictateKeyboardView.findViewById(R.id.edit_redo_btn);
-        editCutButton = dictateKeyboardView.findViewById(R.id.edit_cut_btn);
+        editHistoryButton = dictateKeyboardView.findViewById(R.id.edit_history_btn);
         editCopyButton = dictateKeyboardView.findViewById(R.id.edit_copy_btn);
         editPasteButton = dictateKeyboardView.findViewById(R.id.edit_paste_btn);
         editEmojiButton = dictateKeyboardView.findViewById(R.id.edit_emoji_btn);
@@ -295,6 +368,29 @@ public class DictateInputMethodService extends InputMethodService {
         numberPanelButtons.clear();
         collectNumberPanelButtons(numbersPanelKeysContainer);
         initializeKeyPressAnimations();
+
+        historyPanelCl = dictateKeyboardView.findViewById(R.id.history_panel_cl);
+        historyPanelTitleTv = dictateKeyboardView.findViewById(R.id.history_panel_title_tv);
+        historyPanelCloseBtn = dictateKeyboardView.findViewById(R.id.history_panel_close_btn);
+        historyPanelRv = dictateKeyboardView.findViewById(R.id.history_panel_rv);
+        historyPanelEmptyTv = dictateKeyboardView.findViewById(R.id.history_panel_empty_tv);
+        historyDb = new TranscriptionHistoryDatabaseHelper(this);
+
+        // Clipboard panel
+        clipboardPanelCl = dictateKeyboardView.findViewById(R.id.clipboard_panel_cl);
+        clipboardPanelTitleTv = dictateKeyboardView.findViewById(R.id.clipboard_panel_title_tv);
+        clipboardPanelCloseBtn = dictateKeyboardView.findViewById(R.id.clipboard_panel_close_btn);
+        clipboardPanelRv = dictateKeyboardView.findViewById(R.id.clipboard_panel_rv);
+        clipboardPanelEmptyTv = dictateKeyboardView.findViewById(R.id.clipboard_panel_empty_tv);
+        clipboardDb = new ClipboardHistoryDatabaseHelper(this);
+
+        // Register clipboard listener (guard against double-registration on rotation)
+        if (!clipListenerRegistered) {
+            clipboardManager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            clipListener = this::onClipboardChanged;
+            clipboardManager.addPrimaryClipChangedListener(clipListener);
+            clipListenerRegistered = true;
+        }
 
         overlayCharactersLl = dictateKeyboardView.findViewById(R.id.overlay_characters_ll);
 
@@ -374,7 +470,28 @@ public class DictateInputMethodService extends InputMethodService {
             vibrate();
             // if user clicked on resendButton without error before, audioFile is default audio
             if (audioFile == null) audioFile = new File(getCacheDir(), sp.getString("net.devemperor.dictate.last_file_name", "audio.m4a"));
-            startWhisperApiRequest();
+            String elMode = sp.getString("net.devemperor.dictate.elevenlabs_mode", "off");
+            if ("batch".equals(elMode) && !sp.getString("net.devemperor.dictate.elevenlabs_api_key", "").isEmpty()) {
+                startElevenLabsApiRequest();
+            } else {
+                startWhisperApiRequest();
+            }
+        });
+
+        resendButton.setOnLongClickListener(v -> {
+            vibrate();
+            showHistoryPanel();
+            return true;
+        });
+
+        historyPanelCloseBtn.setOnClickListener(v -> {
+            vibrate();
+            hideHistoryPanel();
+        });
+
+        clipboardPanelCloseBtn.setOnClickListener(v -> {
+            vibrate();
+            hideClipboardPanel();
         });
 
         backspaceButton.setOnClickListener(v -> {
@@ -539,17 +656,22 @@ public class DictateInputMethodService extends InputMethodService {
         // trash button to abort the recording and reset all variables and views
         trashButton.setOnClickListener(v -> {
             vibrate();
+            sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", false).apply();
 
             cancelScoWaitIfAny();  // cancel any pending SCO wait
+
+            // Cancel ElevenLabs streaming if active
+            if (scribeManager != null && scribeManager.isStreaming()) {
+                scribeManager.cancel();
+            }
 
             if (recorder != null) {
                 try { recorder.stop(); } catch (RuntimeException ignored) {}
                 recorder.release();
                 recorder = null;
-
-                if (recordTimeRunnable != null) {
-                    recordTimeHandler.removeCallbacks(recordTimeRunnable);
-                }
+            }
+            if (recordTimeRunnable != null) {
+                recordTimeHandler.removeCallbacks(recordTimeRunnable);
             }
             if (audioFocusEnabled) am.abandonAudioFocusRequest(audioFocusRequest);
             if (isBluetoothScoStarted) am.stopBluetoothSco();
@@ -690,13 +812,17 @@ public class DictateInputMethodService extends InputMethodService {
             return false;
         });
 
+        // initialize history button (replaces cut button)
+        editHistoryButton.setOnClickListener(v -> {
+            vibrate();
+            showHistoryPanel();
+        });
+
         // initialize all edit buttons
         Object[][] buttonsActions = {
                 { editUndoButton, android.R.id.undo },
                 { editRedoButton, android.R.id.redo },
-                { editCutButton,  android.R.id.cut },
-                { editCopyButton, android.R.id.copy },
-                { editPasteButton, android.R.id.paste }
+                { editCopyButton, android.R.id.copy }
         };
 
         for (Object[] pair : buttonsActions) {
@@ -708,6 +834,20 @@ public class DictateInputMethodService extends InputMethodService {
                 }
             });
         }
+
+        // Paste button: short press = normal paste, long press = clipboard panel
+        editPasteButton.setOnClickListener(v -> {
+            vibrate();
+            InputConnection inputConnection = getCurrentInputConnection();
+            if (inputConnection != null) {
+                inputConnection.performContextMenuAction(android.R.id.paste);
+            }
+        });
+        editPasteButton.setOnLongClickListener(v -> {
+            vibrate();
+            showClipboardPanel();
+            return true;
+        });
 
         editEmojiButton.setOnClickListener(v -> {
             vibrate();
@@ -799,12 +939,24 @@ public class DictateInputMethodService extends InputMethodService {
 
         cancelScoWaitIfAny();  // cancel any pending SCO wait
 
+        // Cancel ElevenLabs streaming if active
+        if (scribeManager != null && scribeManager.isStreaming()) {
+            scribeManager.cancel();
+            sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", true).apply();
+        }
+
         if (recorder != null) {
+            boolean stoppedSuccessfully = false;
             try {
                 recorder.stop();
+                stoppedSuccessfully = true;
             } catch (RuntimeException ignored) { }
             recorder.release();
             recorder = null;
+
+            if (stoppedSuccessfully && isRecording) {
+                sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", true).apply();
+            }
 
             if (recordTimeRunnable != null) {
                 recordTimeHandler.removeCallbacks(recordTimeRunnable);
@@ -827,6 +979,9 @@ public class DictateInputMethodService extends InputMethodService {
         infoCl.setVisibility(View.GONE);
         emojiPickerCl.setVisibility(View.GONE);
         numbersPanelCl.setVisibility(View.GONE);
+        historyPanelCl.setVisibility(View.GONE);
+        clipboardPanelCl.setVisibility(View.GONE);
+        releaseHistoryMediaPlayer();
         isRecording = false;
         isPaused = false;
         livePrompt = false;
@@ -839,6 +994,18 @@ public class DictateInputMethodService extends InputMethodService {
         recordButton.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_baseline_mic_20, 0, R.drawable.ic_baseline_folder_open_20, 0);
         recordButton.setEnabled(true);
         updateKeepScreenAwake(false);
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        if (clipListenerRegistered && clipboardManager != null && clipListener != null) {
+            clipboardManager.removePrimaryClipChangedListener(clipListener);
+            clipListenerRegistered = false;
+        }
+        if (clipboardDb != null) {
+            clipboardDb.close();
+        }
     }
 
     // method is called if the keyboard appears again
@@ -939,6 +1106,22 @@ public class DictateInputMethodService extends InputMethodService {
             resendButton.setVisibility(View.GONE);
         }
 
+        // Recovery: if there's a pending transcription from a rotation or crash,
+        // show the resend button so the user can send when the connection is stable.
+        // Do NOT clear the flag here — let it persist so it survives subsequent rotations.
+        // Flag is cleared by: successful transcription, trash button, or starting a new recording.
+        if (sp.getBoolean("net.devemperor.dictate.pending_transcription", false)) {
+            File pendingFile = new File(getCacheDir(), sp.getString("net.devemperor.dictate.last_file_name", "audio.m4a"));
+                    + " exists=" + pendingFile.exists() + " size=" + pendingFile.length());
+            if (pendingFile.exists() && pendingFile.length() > 0) {
+                audioFile = pendingFile;
+                resendButton.setVisibility(View.VISIBLE);
+            } else {
+                // File is gone, clear the stale flag
+                sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", false).apply();
+            }
+        }
+
         // get the currently selected input language
         recordButton.setText(getDictateButtonText());
 
@@ -971,10 +1154,12 @@ public class DictateInputMethodService extends InputMethodService {
         dictateKeyboardView.setBackgroundColor(keyboardBackgroundColor);
         emojiPickerCl.setBackgroundColor(keyboardBackgroundColor);
         numbersPanelCl.setBackgroundColor(keyboardBackgroundColor);
+        historyPanelCl.setBackgroundColor(keyboardBackgroundColor);
+        clipboardPanelCl.setBackgroundColor(keyboardBackgroundColor);
 
         int accentColorMedium = DictateUtils.darkenColor(accentColor, 0.18f);
         int accentColorDark = DictateUtils.darkenColor(accentColor, 0.35f);
-        TextView[] textColorViews = { infoTv, runningPromptTv, emojiPickerTitleTv, numbersPanelTitleTv };
+        TextView[] textColorViews = { infoTv, runningPromptTv, emojiPickerTitleTv, numbersPanelTitleTv, historyPanelTitleTv, clipboardPanelTitleTv };
         for (TextView tv : textColorViews) tv.setTextColor(accentColor);
         applyButtonColor(settingsButton, accentColorDark);
         applyButtonColor(recordButton, accentColor);
@@ -987,13 +1172,15 @@ public class DictateInputMethodService extends InputMethodService {
         applyButtonColor(enterButton, accentColorDark);
         applyButtonColor(editUndoButton, accentColorMedium);
         applyButtonColor(editRedoButton, accentColorMedium);
-        applyButtonColor(editCutButton, accentColorMedium);
+        applyButtonColor(editHistoryButton, accentColorMedium);
         applyButtonColor(editCopyButton, accentColorMedium);
         applyButtonColor(editPasteButton, accentColorMedium);
         applyButtonColor(editEmojiButton, accentColorMedium);
         applyButtonColor(editNumbersButton, accentColorMedium);
         applyButtonColor(emojiPickerCloseButton, accentColor);
         applyButtonColor(numbersPanelCloseButton, accentColor);
+        applyButtonColor(historyPanelCloseBtn, accentColor);
+        applyButtonColor(clipboardPanelCloseBtn, accentColor);
         for (MaterialButton button : numberPanelButtons) {
             Object tag = button.getTag();
             CharSequence text = button.getText();
@@ -1056,6 +1243,7 @@ public class DictateInputMethodService extends InputMethodService {
 
     private void showEmojiPicker() {
         hideNumberPanel();
+        hideClipboardPanel();
         overlayCharactersLl.setVisibility(View.GONE);
         infoCl.setVisibility(View.GONE);
         emojiPickerCl.setVisibility(View.VISIBLE);
@@ -1108,6 +1296,7 @@ public class DictateInputMethodService extends InputMethodService {
     private void showNumberPanel() {
         if (numbersPanelCl == null) return;
         hideEmojiPicker();
+        hideClipboardPanel();
         overlayCharactersLl.setVisibility(View.GONE);
         infoCl.setVisibility(View.GONE);
         numbersPanelCl.setVisibility(View.VISIBLE);
@@ -1161,7 +1350,7 @@ public class DictateInputMethodService extends InputMethodService {
         View[] animatedViews = {
                 settingsButton, recordButton, resendButton, switchButton, trashButton,
                 pauseButton, emojiPickerCloseButton, numbersPanelCloseButton,
-                editUndoButton, editRedoButton, editCutButton, editCopyButton,
+                editUndoButton, editRedoButton, editHistoryButton, editCopyButton,
                 editPasteButton, editEmojiButton, editNumbersButton,
                 infoYesButton, infoNoButton
         };
@@ -1304,6 +1493,17 @@ public class DictateInputMethodService extends InputMethodService {
 
         prepareAutoApplyQueue();
 
+        // Clear any pending recovery — user is starting a fresh recording
+        sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", false).apply();
+
+        // Check if ElevenLabs realtime mode is enabled
+        String elevenLabsMode = sp.getString("net.devemperor.dictate.elevenlabs_mode", "off");
+        String elevenLabsKey = sp.getString("net.devemperor.dictate.elevenlabs_api_key", "");
+        if ("realtime".equals(elevenLabsMode) && !elevenLabsKey.isEmpty()) {
+            startElevenLabsRecording();
+            return;
+        }
+
         audioFile = new File(getCacheDir(), "audio.m4a");
         sp.edit().putString("net.devemperor.dictate.last_file_name", audioFile.getName()).apply();
 
@@ -1338,6 +1538,10 @@ public class DictateInputMethodService extends InputMethodService {
     }
 
     private void proceedStartRecording(int audioSource, boolean useBtForThisRecording) {
+        // Hide history panel if open
+        historyPanelCl.setVisibility(View.GONE);
+        releaseHistoryMediaPlayer();
+
         // Build and start MediaRecorder with the decided audio source
         recorder = new MediaRecorder();
         recorder.setAudioSource(audioSource);
@@ -1394,6 +1598,12 @@ public class DictateInputMethodService extends InputMethodService {
     }
 
     private void stopRecording() {
+        // Check if ElevenLabs streaming is active
+        if (scribeManager != null && scribeManager.isStreaming()) {
+            stopElevenLabsRecording();
+            return;
+        }
+
         cancelScoWaitIfAny();  // cancel any pending SCO wait
 
         if (recorder != null) {
@@ -1412,7 +1622,316 @@ public class DictateInputMethodService extends InputMethodService {
 
         if (isBluetoothScoStarted) am.stopBluetoothSco();
 
-        startWhisperApiRequest();
+        // Mark as pending so recovery works if the process is killed during transcription
+        // Using commit() (synchronous) instead of apply() to guarantee the flag is on disk
+        // before the API call starts — if the process is killed during transcription, the flag survives.
+        sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", true).commit();
+
+        String elevenLabsMode = sp.getString("net.devemperor.dictate.elevenlabs_mode", "off");
+        if ("batch".equals(elevenLabsMode) && !sp.getString("net.devemperor.dictate.elevenlabs_api_key", "").isEmpty()) {
+            startElevenLabsApiRequest();
+        } else {
+            startWhisperApiRequest();
+        }
+    }
+
+    private void startElevenLabsRecording() {
+        // Hide history panel if open
+        historyPanelCl.setVisibility(View.GONE);
+        releaseHistoryMediaPlayer();
+
+        audioFile = new File(getCacheDir(), "audio.wav");
+        sp.edit().putString("net.devemperor.dictate.last_file_name", audioFile.getName()).apply();
+
+        String apiKey = sp.getString("net.devemperor.dictate.elevenlabs_api_key", "");
+
+        if (audioFocusEnabled) am.requestAudioFocus(audioFocusRequest);
+
+        isRecording = true;
+        isPreparingRecording = false;
+        updatePromptButtonsEnabledState();
+
+        recordButton.setEnabled(true);
+        recordButton.setText(R.string.dictate_send);
+        applyRecordingIconState(true);
+        updateRecordButtonIconWhileRecording();
+        updateKeepScreenAwake(true);
+        pauseButton.setVisibility(View.GONE); // no pause for real-time streaming
+        trashButton.setVisibility(View.VISIBLE);
+        resendButton.setVisibility(View.GONE);
+        elapsedTime = 0;
+        recordTimeHandler.post(recordTimeRunnable);
+
+        infoCl.setVisibility(View.VISIBLE);
+        infoTv.setText(R.string.dictate_elevenlabs_listening);
+        infoYesButton.setVisibility(View.GONE);
+        infoNoButton.setVisibility(View.GONE);
+
+        scribeManager.start(apiKey, currentInputLanguageValue, audioFile, new ElevenLabsScribeManager.ScribeCallback() {
+            @Override
+            public void onSessionStarted() {
+            }
+
+            @Override
+            public void onPartialTranscript(String text) {
+                // No preview — text will be delivered all at once in onComplete
+            }
+
+            @Override
+            public void onCommittedTranscript(String text) {
+                // No progressive commit — text will be delivered all at once in onComplete
+            }
+
+            @Override
+            public void onError(String errorType, String message) {
+                mainHandler.post(() -> {
+                    if (vibrationEnabled) vibrator.vibrate(android.os.VibrationEffect.createOneShot(300, android.os.VibrationEffect.DEFAULT_AMPLITUDE));
+                    if (recordTimeRunnable != null) recordTimeHandler.removeCallbacks(recordTimeRunnable);
+                    isRecording = false;
+                    updatePromptButtonsEnabledState();
+                    if (audioFocusEnabled) am.abandonAudioFocusRequest(audioFocusRequest);
+
+                    if ("auth".equals(errorType) || "auth_error".equals(errorType)) {
+                        infoTv.setText(R.string.dictate_elevenlabs_error_auth);
+                    } else {
+                        infoTv.setText(R.string.dictate_elevenlabs_error_connection);
+                    }
+                    infoCl.setVisibility(View.VISIBLE);
+                    infoYesButton.setVisibility(View.GONE);
+                    infoNoButton.setVisibility(View.GONE);
+                    resendButton.setVisibility(View.VISIBLE);
+                    trashButton.setVisibility(View.GONE);
+
+                    recordButton.setText(getDictateButtonText());
+                    applyRecordingIconState(false);
+                    recordButton.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_baseline_mic_20, 0, R.drawable.ic_baseline_folder_open_20, 0);
+                    recordButton.setEnabled(true);
+                    updateKeepScreenAwake(false);
+                });
+            }
+
+            @Override
+            public void onComplete(String fullText, File audioFile, float durationSeconds) {
+                mainHandler.post(() -> {
+                    if (recordTimeRunnable != null) recordTimeHandler.removeCallbacks(recordTimeRunnable);
+                    isRecording = false;
+                    updatePromptButtonsEnabledState();
+                    if (audioFocusEnabled) am.abandonAudioFocusRequest(audioFocusRequest);
+                    infoCl.setVisibility(View.GONE);
+
+                    // Track usage
+                    usageDb.edit("scribe_v2_realtime", (long) durationSeconds, 0, 0, 3);
+
+                    // Strip audio event tags if setting is off
+                    String resultText = sp.getBoolean("net.devemperor.dictate.elevenlabs_tag_audio_events", false)
+                            ? fullText : ElevenLabsScribeManager.stripAudioEventTags(fullText);
+                    resultText = applyAutoFormattingIfEnabled(resultText);
+
+                    // Process rewording prompts (now supported since text is delivered all at once)
+                    boolean processedByQueuedPrompts = false;
+                    java.util.List<Integer> promptsToApply;
+                    synchronized (queuedPromptIds) {
+                        promptsToApply = new ArrayList<>(queuedPromptIds);
+                    }
+                    if (!promptsToApply.isEmpty()) {
+                        clearQueuedPrompts();
+                        if (!livePrompt) {
+                            processQueuedPrompts(resultText, promptsToApply);
+                            processedByQueuedPrompts = true;
+                        }
+                    }
+
+                    if (!processedByQueuedPrompts && !livePrompt) {
+                        commitTextToInputConnection(resultText);
+                    } else if (livePrompt) {
+                        livePrompt = false;
+                        startGPTApiRequest(new PromptModel(-1, Integer.MIN_VALUE, "", resultText, true, false));
+                    }
+
+                    // Save to history (skip if resending from history)
+                    if (!audioFile.getAbsolutePath().startsWith(getHistoryDir().getAbsolutePath())) {
+                        saveToHistory(resultText, durationSeconds);
+                    }
+
+                    sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", false).apply();
+
+                    if (new File(getCacheDir(), sp.getString("net.devemperor.dictate.last_file_name", "audio.wav")).exists()
+                            && sp.getBoolean("net.devemperor.dictate.resend_button", false)) {
+                        resendButton.setVisibility(View.VISIBLE);
+                    }
+
+                    recordButton.setText(getDictateButtonText());
+                    applyRecordingIconState(false);
+                    recordButton.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_baseline_mic_20, 0, R.drawable.ic_baseline_folder_open_20, 0);
+                    recordButton.setEnabled(true);
+                    updateKeepScreenAwake(false);
+
+                    if (autoSwitchKeyboard) {
+                        autoSwitchKeyboard = false;
+                        switchToPreviousKeyboard();
+                    }
+                });
+            }
+
+            @Override
+            public void onConnectionClosed() {
+            }
+        });
+    }
+
+    private void stopElevenLabsRecording() {
+        if (recordTimeRunnable != null) {
+            recordTimeHandler.removeCallbacks(recordTimeRunnable);
+        }
+        updateKeepScreenAwake(false);
+
+        recordButton.setText(R.string.dictate_elevenlabs_finalizing);
+        recordButton.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_baseline_send_20, 0, 0, 0);
+        recordButton.setEnabled(false);
+        trashButton.setVisibility(View.GONE);
+        applyRecordingIconState(false);
+
+        infoTv.setText(R.string.dictate_elevenlabs_finalizing);
+        infoCl.setVisibility(View.VISIBLE);
+
+        sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", true).commit();
+
+        scribeManager.stop(); // triggers onComplete callback
+    }
+
+    private void startElevenLabsApiRequest() {
+        applyRecordingIconState(false);
+
+        recordButton.setText(R.string.dictate_elevenlabs_transcribing);
+        recordButton.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_baseline_send_20, 0, 0, 0);
+        recordButton.setEnabled(false);
+        pauseButton.setForeground(AppCompatResources.getDrawable(this, R.drawable.ic_baseline_pause_24));
+        pauseButton.setVisibility(View.GONE);
+        trashButton.setVisibility(View.GONE);
+        resendButton.setVisibility(View.GONE);
+        infoCl.setVisibility(View.GONE);
+        isRecording = false;
+        isPaused = false;
+        recordingUsesBluetooth = false;
+        updatePromptButtonsEnabledState();
+
+        if (audioFocusEnabled) am.abandonAudioFocusRequest(audioFocusRequest);
+
+        String apiKey = sp.getString("net.devemperor.dictate.elevenlabs_api_key", "");
+        String langCode = ElevenLabsScribeManager.mapLanguageCodePublic(currentInputLanguageValue);
+
+        speechApiThread = java.util.concurrent.Executors.newSingleThreadExecutor();
+        speechApiThread.execute(() -> {
+            try {
+                OkHttpClient httpClient = new OkHttpClient.Builder()
+                        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                        .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+                        .writeTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
+                        .build();
+
+                String mimeType = audioFile.getName().endsWith(".wav") ? "audio/wav" : "audio/mp4";
+                boolean tagAudioEvents = sp.getBoolean("net.devemperor.dictate.elevenlabs_tag_audio_events", false);
+                MultipartBody.Builder bodyBuilder = new MultipartBody.Builder()
+                        .setType(MultipartBody.FORM)
+                        .addFormDataPart("model_id", "scribe_v2")
+                        .addFormDataPart("tag_audio_events", String.valueOf(tagAudioEvents))
+                        .addFormDataPart("file", audioFile.getName(),
+                                RequestBody.create(audioFile, MediaType.parse(mimeType)));
+
+                if (langCode != null) {
+                    bodyBuilder.addFormDataPart("language_code", langCode);
+                }
+
+                Request request = new Request.Builder()
+                        .url("https://api.elevenlabs.io/v1/speech-to-text")
+                        .addHeader("xi-api-key", apiKey)
+                        .post(bodyBuilder.build())
+                        .build();
+
+                try (Response response = httpClient.newCall(request).execute()) {
+                    String responseBody = response.body() != null ? response.body().string() : "";
+
+                    if (!response.isSuccessful()) {
+                        String errorMsg;
+                        if (response.code() == 401 || response.code() == 403) {
+                            errorMsg = "api key";
+                        } else if (response.code() == 429) {
+                            errorMsg = "quota";
+                        } else {
+                            errorMsg = "ElevenLabs API error " + response.code() + ": " + responseBody;
+                        }
+                        throw new RuntimeException(errorMsg);
+                    }
+
+                    JSONObject json = new JSONObject(responseBody);
+                    String resultText = json.optString("text", "").strip();
+                    resultText = applyAutoFormattingIfEnabled(resultText);
+
+                    float duration = DictateUtils.getAudioDuration(audioFile);
+                    usageDb.edit("scribe_v2", (long) duration, 0, 0, 3);
+
+                    boolean processedByQueuedPrompts = false;
+                    java.util.List<Integer> promptsToApply;
+                    synchronized (queuedPromptIds) {
+                        promptsToApply = new ArrayList<>(queuedPromptIds);
+                    }
+                    if (!promptsToApply.isEmpty()) {
+                        clearQueuedPrompts();
+                        if (!livePrompt) {
+                            processQueuedPrompts(resultText, promptsToApply);
+                            processedByQueuedPrompts = true;
+                        }
+                    }
+
+                    if (!processedByQueuedPrompts && !livePrompt) {
+                        commitTextToInputConnection(resultText);
+                    } else if (livePrompt) {
+                        livePrompt = false;
+                        startGPTApiRequest(new PromptModel(-1, Integer.MIN_VALUE, "", resultText, true, false));
+                    }
+
+                    if (new File(getCacheDir(), sp.getString("net.devemperor.dictate.last_file_name", "audio.m4a")).exists()
+                            && sp.getBoolean("net.devemperor.dictate.resend_button", false)) {
+                        mainHandler.post(() -> resendButton.setVisibility(View.VISIBLE));
+                    }
+
+                    if (!audioFile.getAbsolutePath().startsWith(getHistoryDir().getAbsolutePath())) {
+                        saveToHistory(resultText, duration);
+                    }
+
+                    sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", false).apply();
+
+                    if (autoSwitchKeyboard) {
+                        autoSwitchKeyboard = false;
+                        mainHandler.post(this::switchToPreviousKeyboard);
+                    }
+                }
+            } catch (RuntimeException | IOException | JSONException e) {
+                sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", false).apply();
+                if (!(e instanceof InterruptedIOException)) {
+                    sendLogToCrashlytics(e instanceof RuntimeException ? (RuntimeException) e : new RuntimeException(e));
+                    if (vibrationEnabled) vibrator.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE));
+                    mainHandler.post(() -> {
+                        resendButton.setVisibility(View.VISIBLE);
+                        String message = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
+                        if (message.contains("api key")) {
+                            showInfo("invalid_api_key");
+                        } else if (message.contains("quota")) {
+                            showInfo("quota_exceeded");
+                        } else {
+                            showInfo("internet_error");
+                        }
+                    });
+                }
+            }
+
+            mainHandler.post(() -> {
+                recordButton.setText(getDictateButtonText());
+                applyRecordingIconState(false);
+                recordButton.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_baseline_mic_20, 0, R.drawable.ic_baseline_folder_open_20, 0);
+                recordButton.setEnabled(true);
+            });
+        });
     }
 
     private void updateKeepScreenAwake(boolean keepAwake) {
@@ -1563,12 +2082,20 @@ public class DictateInputMethodService extends InputMethodService {
                     mainHandler.post(() -> resendButton.setVisibility(View.VISIBLE));
                 }
 
+                // Save to transcription history (skip if resending from history)
+                if (!audioFile.getAbsolutePath().startsWith(getHistoryDir().getAbsolutePath())) {
+                    saveToHistory(resultText, DictateUtils.getAudioDuration(audioFile));
+                }
+
+                sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", false).apply();
+
                 if (autoSwitchKeyboard) {
                     autoSwitchKeyboard = false;
                     mainHandler.post(this::switchToPreviousKeyboard);
                 }
 
             } catch (RuntimeException e) {
+                sp.edit().putBoolean("net.devemperor.dictate.pending_transcription", false).apply();
                 if (!(e.getCause() instanceof InterruptedIOException)) {
                     sendLogToCrashlytics(e);
                     if (vibrationEnabled) vibrator.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE));
@@ -1606,6 +2133,315 @@ public class DictateInputMethodService extends InputMethodService {
             });
         });
     }
+
+    // ======================== HISTORY METHODS ========================
+
+    private File getHistoryDir() {
+        File dir = new File(getFilesDir(), "transcription_history");
+        if (!dir.exists()) dir.mkdirs();
+        return dir;
+    }
+
+    private void saveToHistory(String transcriptionText, float durationSeconds) {
+        try {
+            String ext = audioFile.getName().endsWith(".wav") ? ".wav" : ".m4a";
+            String fileName = "transcription_" + System.currentTimeMillis() + ext;
+            File destFile = new File(getHistoryDir(), fileName);
+            copyFile(audioFile, destFile);
+
+            TranscriptionHistoryModel model = new TranscriptionHistoryModel(
+                    0, fileName, transcriptionText, durationSeconds,
+                    System.currentTimeMillis(), currentInputLanguageValue);
+            historyDb.add(model);
+            cleanupHistory();
+        } catch (IOException e) {
+        }
+    }
+
+    private void copyFile(File src, File dst) throws IOException {
+        try (FileInputStream in = new FileInputStream(src);
+             FileOutputStream out = new FileOutputStream(dst)) {
+            byte[] buf = new byte[8192];
+            int len;
+            while ((len = in.read(buf)) > 0) {
+                out.write(buf, 0, len);
+            }
+        }
+    }
+
+    private void cleanupHistory() {
+        try {
+            int maxEntries = Integer.parseInt(sp.getString("net.devemperor.dictate.history_max_entries", "30"));
+            int retentionDays = Integer.parseInt(sp.getString("net.devemperor.dictate.history_retention_days", "7"));
+            long retentionMillis = retentionDays * 86400000L;
+
+            List<TranscriptionHistoryModel> toDelete = historyDb.getOldEntries(maxEntries, retentionMillis);
+            for (TranscriptionHistoryModel entry : toDelete) {
+                File file = new File(getHistoryDir(), entry.getAudioFileName());
+                if (file.exists()) file.delete();
+                historyDb.delete(entry.getId());
+            }
+        } catch (Exception e) {
+        }
+    }
+
+    private void showHistoryPanel() {
+        emojiPickerCl.setVisibility(View.GONE);
+        numbersPanelCl.setVisibility(View.GONE);
+        hideClipboardPanel();
+
+        List<TranscriptionHistoryModel> historyItems = historyDb.getAll();
+        if (historyItems.isEmpty()) {
+            historyPanelEmptyTv.setVisibility(View.VISIBLE);
+            historyPanelRv.setVisibility(View.GONE);
+        } else {
+            historyPanelEmptyTv.setVisibility(View.GONE);
+            historyPanelRv.setVisibility(View.VISIBLE);
+        }
+
+        int accentColor = sp.getInt("net.devemperor.dictate.accent_color", -14700810);
+        int accentColorMedium = DictateUtils.darkenColor(accentColor, 0.18f);
+        historyAdapter = new TranscriptionHistoryAdapter(historyItems, new TranscriptionHistoryAdapter.HistoryCallback() {
+            @Override
+            public void onItemClicked(TranscriptionHistoryModel model) {
+                vibrate();
+                handleHistoryItemResend(model);
+            }
+
+            @Override
+            public void onPlayClicked(TranscriptionHistoryModel model, int position) {
+                vibrate();
+                handleHistoryItemPlay(model, position);
+            }
+        }, accentColorMedium);
+        historyPanelRv.setLayoutManager(new LinearLayoutManager(this));
+        historyPanelRv.setAdapter(historyAdapter);
+        historyPanelCl.setVisibility(View.VISIBLE);
+    }
+
+    private void hideHistoryPanel() {
+        historyPanelCl.setVisibility(View.GONE);
+        releaseHistoryMediaPlayer();
+    }
+
+    private void releaseHistoryMediaPlayer() {
+        if (historyMediaPlayer != null) {
+            if (historyMediaPlayer.isPlaying()) historyMediaPlayer.stop();
+            historyMediaPlayer.release();
+            historyMediaPlayer = null;
+        }
+        if (historyAdapter != null) {
+            historyAdapter.updatePlayButton(-1, false);
+        }
+    }
+
+    private void handleHistoryItemPlay(TranscriptionHistoryModel model, int position) {
+        // If tapping the same item that's playing, stop it
+        if (historyMediaPlayer != null && historyAdapter != null
+                && historyAdapter.currentlyPlayingPosition == position) {
+            releaseHistoryMediaPlayer();
+            return;
+        }
+
+        // Stop any current playback
+        releaseHistoryMediaPlayer();
+
+        File historyFile = new File(getHistoryDir(), model.getAudioFileName());
+        if (!historyFile.exists()) return;
+
+        try {
+            historyMediaPlayer = new MediaPlayer();
+            historyMediaPlayer.setDataSource(historyFile.getAbsolutePath());
+            historyMediaPlayer.setOnPreparedListener(mp -> {
+                mp.start();
+                if (historyAdapter != null) historyAdapter.updatePlayButton(position, true);
+            });
+            historyMediaPlayer.setOnCompletionListener(mp -> {
+                releaseHistoryMediaPlayer();
+            });
+            historyMediaPlayer.prepareAsync();
+        } catch (IOException e) {
+            releaseHistoryMediaPlayer();
+        }
+    }
+
+    private void handleHistoryItemResend(TranscriptionHistoryModel model) {
+        File historyFile = new File(getHistoryDir(), model.getAudioFileName());
+        if (!historyFile.exists()) return;
+
+        hideHistoryPanel();
+        audioFile = historyFile;
+        String elMode = sp.getString("net.devemperor.dictate.elevenlabs_mode", "off");
+        if ("batch".equals(elMode) && !sp.getString("net.devemperor.dictate.elevenlabs_api_key", "").isEmpty()) {
+            startElevenLabsApiRequest();
+        } else {
+            startWhisperApiRequest();
+        }
+    }
+
+    // ======================== END HISTORY METHODS ========================
+
+    // ======================== CLIPBOARD METHODS ========================
+
+    private void onClipboardChanged() {
+        if (clipboardManager == null) return;
+        try {
+            ClipData clip = clipboardManager.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0) return;
+
+            // Skip sensitive content (passwords, OTPs)
+            ClipDescription desc = clip.getDescription();
+            if (desc != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    PersistableBundle extras = desc.getExtras();
+                    if (extras != null && extras.getBoolean(ClipDescription.EXTRA_IS_SENSITIVE, false)) {
+                        return;
+                    }
+                }
+            }
+
+            CharSequence text = clip.getItemAt(0).getText();
+            if (text == null || text.length() == 0) return;
+
+            String clipText = text.toString().trim();
+            if (clipText.isEmpty()) return;
+
+            // Save on background thread
+            Executors.newSingleThreadExecutor().execute(() -> {
+                clipboardDb.add(clipText);
+                cleanupClipboard();
+            });
+        } catch (Exception e) {
+        }
+    }
+
+    private void showClipboardPanel() {
+        emojiPickerCl.setVisibility(View.GONE);
+        numbersPanelCl.setVisibility(View.GONE);
+        hideHistoryPanel();
+        overlayCharactersLl.setVisibility(View.GONE);
+        infoCl.setVisibility(View.GONE);
+
+        List<ClipboardHistoryModel> items = clipboardDb.getAll();
+        if (items.isEmpty()) {
+            clipboardPanelEmptyTv.setVisibility(View.VISIBLE);
+            clipboardPanelRv.setVisibility(View.GONE);
+        } else {
+            clipboardPanelEmptyTv.setVisibility(View.GONE);
+            clipboardPanelRv.setVisibility(View.VISIBLE);
+        }
+
+        int accentColor = sp.getInt("net.devemperor.dictate.accent_color", -14700810);
+        int accentColorMedium = DictateUtils.darkenColor(accentColor, 0.18f);
+
+        // Determine card and text colors based on theme
+        String theme = sp.getString("net.devemperor.dictate.theme", "system");
+        boolean isDark = "dark".equals(theme) || ("system".equals(theme) && (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES);
+        int cardColor = isDark ? Color.parseColor("#2C2C2C") : Color.parseColor("#F0F0F0");
+        int textColor = isDark ? Color.parseColor("#E0E0E0") : Color.parseColor("#1C1C1C");
+
+        clipboardAdapter = new ClipboardHistoryAdapter(items, new ClipboardHistoryAdapter.ClipboardCallback() {
+            @Override
+            public void onItemClicked(ClipboardHistoryModel model) {
+                vibrate();
+                handleClipboardItemPaste(model);
+            }
+
+            @Override
+            public void onItemLongClicked(ClipboardHistoryModel model, int position, View anchor) {
+                vibrate();
+                showClipboardItemMenu(model, position, anchor);
+            }
+        }, cardColor, textColor);
+
+        StaggeredGridLayoutManager layoutManager = new StaggeredGridLayoutManager(2, StaggeredGridLayoutManager.VERTICAL);
+        layoutManager.setGapStrategy(StaggeredGridLayoutManager.GAP_HANDLING_MOVE_ITEMS_BETWEEN_SPANS);
+        clipboardPanelRv.setLayoutManager(layoutManager);
+        clipboardPanelRv.setAdapter(clipboardAdapter);
+
+        // Swipe-to-delete
+        ItemTouchHelper.SimpleCallback swipeCallback = new ItemTouchHelper.SimpleCallback(0, ItemTouchHelper.LEFT | ItemTouchHelper.RIGHT) {
+            @Override
+            public boolean onMove(@NonNull RecyclerView recyclerView, @NonNull RecyclerView.ViewHolder viewHolder, @NonNull RecyclerView.ViewHolder target) {
+                return false;
+            }
+
+            @Override
+            public void onSwiped(@NonNull RecyclerView.ViewHolder viewHolder, int direction) {
+                int pos = viewHolder.getAdapterPosition();
+                ClipboardHistoryModel item = clipboardAdapter.getItem(pos);
+                if (item != null) {
+                    clipboardDb.delete(item.getId());
+                    clipboardAdapter.removeItem(pos);
+                    if (clipboardAdapter.getItemCount() == 0) {
+                        clipboardPanelEmptyTv.setVisibility(View.VISIBLE);
+                        clipboardPanelRv.setVisibility(View.GONE);
+                    }
+                }
+            }
+        };
+        new ItemTouchHelper(swipeCallback).attachToRecyclerView(clipboardPanelRv);
+
+        clipboardPanelCl.setVisibility(View.VISIBLE);
+        clipboardPanelCl.bringToFront();
+    }
+
+    private void hideClipboardPanel() {
+        if (clipboardPanelCl != null) {
+            clipboardPanelCl.setVisibility(View.GONE);
+        }
+    }
+
+    private void handleClipboardItemPaste(ClipboardHistoryModel model) {
+        InputConnection ic = getCurrentInputConnection();
+        if (ic != null) {
+            ic.commitText(model.getClipText(), 1);
+        }
+        hideClipboardPanel();
+    }
+
+    private void showClipboardItemMenu(ClipboardHistoryModel model, int position, View anchor) {
+        Context wrapper = new ContextThemeWrapper(this, R.style.Theme_Dictate);
+        PopupMenu popup = new PopupMenu(wrapper, anchor);
+        popup.getMenu().add(0, 1, 0, R.string.dictate_clipboard_paste);
+        popup.getMenu().add(0, 2, 1, model.isPinned() ? R.string.dictate_clipboard_unpin : R.string.dictate_clipboard_pin);
+        popup.getMenu().add(0, 3, 2, R.string.dictate_clipboard_delete);
+
+        popup.setOnMenuItemClickListener(item -> {
+            switch (item.getItemId()) {
+                case 1: // Paste
+                    handleClipboardItemPaste(model);
+                    return true;
+                case 2: // Pin/Unpin
+                    clipboardDb.pin(model.getId(), !model.isPinned());
+                    showClipboardPanel(); // refresh to reorder
+                    return true;
+                case 3: // Delete
+                    clipboardDb.delete(model.getId());
+                    clipboardAdapter.removeItem(position);
+                    if (clipboardAdapter.getItemCount() == 0) {
+                        clipboardPanelEmptyTv.setVisibility(View.VISIBLE);
+                        clipboardPanelRv.setVisibility(View.GONE);
+                    }
+                    return true;
+                default:
+                    return false;
+            }
+        });
+        popup.show();
+    }
+
+    private void cleanupClipboard() {
+        try {
+            int maxItems = Integer.parseInt(sp.getString("net.devemperor.dictate.clipboard_max_items", "30"));
+            int retentionHours = Integer.parseInt(sp.getString("net.devemperor.dictate.clipboard_retention_hours", "24"));
+            long retentionMillis = retentionHours * 3600000L;
+            clipboardDb.deleteOldUnpinned(retentionMillis, maxItems);
+        } catch (Exception e) {
+        }
+    }
+
+    // ======================== END CLIPBOARD METHODS ========================
 
     private void startGPTApiRequest(PromptModel model) {
         startGPTApiRequest(model, null, null, true);
@@ -1803,12 +2639,18 @@ public class DictateInputMethodService extends InputMethodService {
     }
 
     private void commitTextToInputConnection(String text) {
+        // Ensure commits run on the main thread — InputConnection can be stale on background threads after rotation
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post(() -> commitTextToInputConnection(text));
+            return;
+        }
+
         InputConnection inputConnection = getCurrentInputConnection();
         if (inputConnection == null) return;
 
         String output = text == null ? "" : text;
         if (sp.getBoolean("net.devemperor.dictate.instant_output", true)) {
-            inputConnection.commitText(output, 1);
+            boolean committed = inputConnection.commitText(output, 1);
             if (sp.getBoolean("net.devemperor.dictate.auto_enter", false)) {
                 performEnterAction();
             }

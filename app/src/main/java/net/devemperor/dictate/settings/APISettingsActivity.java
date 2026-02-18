@@ -67,6 +67,8 @@ public class APISettingsActivity extends AppCompatActivity {
     private ArrayAdapter<CharSequence> rewordingModelGroqAdapter;
     private ArrayAdapter<CharSequence> rewordingProviderAdapter;
 
+    private EditText elevenLabsAPIKeyEt;
+
     private boolean ignoreTextChange = false;
     private SharedPreferences sp;
 
@@ -280,6 +282,17 @@ public class APISettingsActivity extends AppCompatActivity {
             @Override
             public void afterTextChanged(Editable editable) {
                 sp.edit().putString("net.devemperor.dictate.rewording_custom_model", editable.toString()).apply();
+            }
+        });
+
+
+        // CONFIGURE ELEVENLABS API KEY
+        elevenLabsAPIKeyEt = findViewById(R.id.api_settings_elevenlabs_api_key_et);
+        elevenLabsAPIKeyEt.setText(sp.getString("net.devemperor.dictate.elevenlabs_api_key", ""));
+        elevenLabsAPIKeyEt.addTextChangedListener(new SimpleTextWatcher() {
+            @Override
+            public void afterTextChanged(Editable editable) {
+                sp.edit().putString("net.devemperor.dictate.elevenlabs_api_key", editable.toString()).apply();
             }
         });
     }
