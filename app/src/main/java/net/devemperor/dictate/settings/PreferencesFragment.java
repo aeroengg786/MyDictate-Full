@@ -39,6 +39,16 @@ public class PreferencesFragment extends PreferenceFragmentCompat {
     @Override
     public void onCreatePreferences(Bundle savedInstanceState, String rootKey) {
         getPreferenceManager().setSharedPreferencesName("net.devemperor.dictate");
+
+        // Migrate old boolean elevenlabs_mode to new string ListPreference
+        SharedPreferences migrateSp = requireContext().getSharedPreferences("net.devemperor.dictate", 0);
+        if (migrateSp.getAll().get("net.devemperor.dictate.elevenlabs_mode") instanceof Boolean) {
+            boolean oldValue = migrateSp.getBoolean("net.devemperor.dictate.elevenlabs_mode", false);
+            migrateSp.edit().remove("net.devemperor.dictate.elevenlabs_mode")
+                    .putString("net.devemperor.dictate.elevenlabs_mode", oldValue ? "realtime" : "off")
+                    .commit();
+        }
+
         setPreferencesFromResource(R.xml.fragment_preferences, null);
         sp = getPreferenceManager().getSharedPreferences();
         usageDatabaseHelper = new UsageDatabaseHelper(requireContext());

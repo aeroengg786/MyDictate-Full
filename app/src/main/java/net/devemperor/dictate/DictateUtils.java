@@ -156,6 +156,12 @@ public class DictateUtils {
             case "gpt-4o-mini-transcribe":
                 return audioTime * 0.00005f;
 
+            // ElevenLabs transcription models
+            case "scribe_v2":
+                return audioTime * 0.000003;
+            case "scribe_v2_realtime":
+                return audioTime * 0.000004;
+
             // OpenAI rewording models
             case "o4-mini":
             case "o3-mini":  // o4-mini, o3-mini and o1-mini cost the same
@@ -212,6 +218,12 @@ public class DictateUtils {
                 return "GPT-4o transcribe";
             case "gpt-4o-mini-transcribe":
                 return "GPT-4o mini transcribe";
+
+            // ElevenLabs transcription models
+            case "scribe_v2":
+                return "ElevenLabs Scribe v2";
+            case "scribe_v2_realtime":
+                return "ElevenLabs Scribe v2 RT";
 
             // OpenAI rewording models
             case "o4-mini":

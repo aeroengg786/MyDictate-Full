@@ -66,6 +66,42 @@
             android:defaultValue="false"
             app:iconSpaceReserved="false"/>
 
+        <androidx.preference.ListPreference
+            android:key="net.devemperor.dictate.history_max_entries"
+            android:title="@string/dictate_settings_history_max_entries_title"
+            android:summary="%s"
+            android:defaultValue="30"
+            app:entries="@array/dictate_history_max_entries"
+            app:entryValues="@array/dictate_history_max_entries_values"
+            app:iconSpaceReserved="false"/>
+
+        <androidx.preference.ListPreference
+            android:key="net.devemperor.dictate.history_retention_days"
+            android:title="@string/dictate_settings_history_retention_title"
+            android:summary="%s"
+            android:defaultValue="7"
+            app:entries="@array/dictate_history_retention"
+            app:entryValues="@array/dictate_history_retention_values"
+            app:iconSpaceReserved="false"/>
+
+        <androidx.preference.ListPreference
+            android:key="net.devemperor.dictate.clipboard_max_items"
+            android:title="@string/dictate_settings_clipboard_max_items_title"
+            android:summary="%s"
+            android:defaultValue="30"
+            app:entries="@array/dictate_clipboard_max_items"
+            app:entryValues="@array/dictate_clipboard_max_items_values"
+            app:iconSpaceReserved="false"/>
+
+        <androidx.preference.ListPreference
+            android:key="net.devemperor.dictate.clipboard_retention_hours"
+            android:title="@string/dictate_settings_clipboard_retention_title"
+            android:summary="%s"
+            android:defaultValue="24"
+            app:entries="@array/dictate_clipboard_retention"
+            app:entryValues="@array/dictate_clipboard_retention_values"
+            app:iconSpaceReserved="false"/>
+
         <androidx.preference.SwitchPreference
             android:key="net.devemperor.dictate.instant_recording"
             android:title="@string/dictate_settings_instant_recording_title"
@@ -156,6 +192,22 @@
     <androidx.preference.PreferenceCategory
         android:title="@string/dictate_settings_api_title"
         app:iconSpaceReserved="false">
+
+        <androidx.preference.ListPreference
+            android:key="net.devemperor.dictate.elevenlabs_mode"
+            android:title="@string/dictate_settings_elevenlabs_mode_title"
+            android:summary="%s"
+            android:entries="@array/dictate_elevenlabs_mode_entries"
+            android:entryValues="@array/dictate_elevenlabs_mode_values"
+            android:defaultValue="off"
+            app:iconSpaceReserved="false"/>
+
+        <androidx.preference.SwitchPreference
+            android:key="net.devemperor.dictate.elevenlabs_tag_audio_events"
+            android:title="@string/dictate_settings_tag_audio_events_title"
+            android:summary="@string/dictate_settings_tag_audio_events_summary"
+            android:defaultValue="false"
+            app:iconSpaceReserved="false"/>
 
         <androidx.preference.Preference
             android:key="net.devemperor.dictate.api_settings"

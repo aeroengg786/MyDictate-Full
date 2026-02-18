@@ -222,16 +222,16 @@
             android:foreground="@drawable/ic_baseline_redo_24"
             android:foregroundGravity="center"
             app:layout_constraintBottom_toBottomOf="parent"
-            app:layout_constraintEnd_toStartOf="@+id/edit_cut_btn"
+            app:layout_constraintEnd_toStartOf="@+id/edit_history_btn"
             app:layout_constraintStart_toEndOf="@+id/edit_undo_btn"
             app:layout_constraintTop_toTopOf="parent" />
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/edit_cut_btn"
+            android:id="@+id/edit_history_btn"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_marginHorizontal="4dp"
-            android:foreground="@drawable/ic_baseline_content_cut_24"
+            android:foreground="@drawable/ic_baseline_history_24"
             android:foregroundGravity="center"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toStartOf="@+id/edit_copy_btn"
@@ -247,7 +247,7 @@
             android:foregroundGravity="center"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toStartOf="@+id/edit_paste_btn"
-            app:layout_constraintStart_toEndOf="@+id/edit_cut_btn"
+            app:layout_constraintStart_toEndOf="@+id/edit_history_btn"
             app:layout_constraintTop_toTopOf="parent" />
 
         <com.google.android.material.button.MaterialButton
@@ -659,6 +659,128 @@
             </LinearLayout>
 
         </LinearLayout>
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/history_panel_cl"
+        android:layout_width="0dp"
+        android:layout_height="320dp"
+        android:background="@color/dictate_keyboard_background_light"
+        android:padding="16dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:visibility="gone">
+
+        <TextView
+            android:id="@+id/history_panel_title_tv"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:text="@string/dictate_history_panel_title"
+            android:textColor="@color/dictate_blue"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            app:layout_constraintBottom_toBottomOf="@+id/history_panel_close_btn"
+            app:layout_constraintEnd_toStartOf="@+id/history_panel_close_btn"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="@+id/history_panel_close_btn" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/history_panel_close_btn"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:foreground="@drawable/ic_baseline_close_24"
+            android:foregroundGravity="center"
+            android:minWidth="0dp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <TextView
+            android:id="@+id/history_panel_empty_tv"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:text="@string/dictate_history_empty"
+            android:textSize="14sp"
+            android:gravity="center"
+            android:visibility="gone"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/history_panel_close_btn" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/history_panel_rv"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_marginTop="8dp"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/history_panel_close_btn" />
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/clipboard_panel_cl"
+        android:layout_width="0dp"
+        android:layout_height="320dp"
+        android:background="@color/dictate_keyboard_background_light"
+        android:padding="16dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        tools:visibility="gone">
+
+        <TextView
+            android:id="@+id/clipboard_panel_title_tv"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:text="@string/dictate_clipboard_panel_title"
+            android:textColor="@color/dictate_blue"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            app:layout_constraintBottom_toBottomOf="@+id/clipboard_panel_close_btn"
+            app:layout_constraintEnd_toStartOf="@+id/clipboard_panel_close_btn"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="@+id/clipboard_panel_close_btn" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/clipboard_panel_close_btn"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:foreground="@drawable/ic_baseline_close_24"
+            android:foregroundGravity="center"
+            android:minWidth="0dp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <TextView
+            android:id="@+id/clipboard_panel_empty_tv"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:text="@string/dictate_clipboard_empty"
+            android:textSize="14sp"
+            android:gravity="center"
+            android:visibility="gone"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/clipboard_panel_close_btn" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/clipboard_panel_rv"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_marginTop="8dp"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@+id/clipboard_panel_close_btn" />
 
     </androidx.constraintlayout.widget.ConstraintLayout>
 
