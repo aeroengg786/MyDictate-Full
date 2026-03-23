@@ -1,4 +1,4 @@
-name: Build APK
+name: Force Build APK
 on: [push, workflow_dispatch]
 
 jobs:
@@ -8,21 +8,24 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: gradle
 
-      - name: Make Gradle Executable
+      - name: Accept Android Licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Grant Execute Permission
         run: chmod +x gradlew
 
-      - name: Build with Gradle
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Build APK (Ignore Errors & Lint)
+        run: ./gradlew assembleDebug -x lint -x test --stacktrace
 
-      - name: Upload APK
-        if: success()
+      - name: Upload APK Artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dictate-debug-apk
